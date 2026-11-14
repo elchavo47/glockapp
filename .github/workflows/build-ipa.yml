@@ -17,6 +17,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Unzip project (if a .zip was uploaded)
+        run: |
+          ZIP=$(find . -maxdepth 1 -name '*.zip' | head -1)
+          if [ -z "$ZIP" ]; then
+            echo "No zip in repo root, using repo files as-is."
+            exit 0
+          fi
+          echo "Extracting $ZIP"
+          TMP=$(mktemp -d)
+          unzip -q "$ZIP" -d "$TMP"
+          rm -rf "$TMP/__MACOSX"
+          # If the zip has a single wrapper folder, step into it
+          if [ "$(ls -A "$TMP" | wc -l)" -eq 1 ] && [ -d "$TMP/$(ls -A "$TMP")" ]; then
+            SRC="$TMP/$(ls -A "$TMP")"
+          else
+            SRC="$TMP"
+          fi
+          cp -R "$SRC"/. .
+          rm -f "$ZIP"
+          ls -la
+
       - name: Detect project type
         id: detect
         run: |
