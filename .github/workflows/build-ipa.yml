@@ -1,0 +1,97 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: "Xcode scheme (leave empty to auto-detect)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        run: |
+          if [ -f pubspec.yaml ]; then
+            echo "type=flutter" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(find . -maxdepth 4 \( -name '*.xcworkspace' -o -name '*.xcodeproj' \) -not -path '*/Pods/*' -not -path '*/.build/*' | head -1)" ]; then
+            echo "type=xcode" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=none" >> "$GITHUB_OUTPUT"
+            echo "::notice::No iOS project found yet (no pubspec.yaml / .xcodeproj / .xcworkspace). Skipping build."
+          fi
+
+      # ---------- Flutter ----------
+      - name: Set up Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build (Flutter, unsigned)
+        if: steps.detect.outputs.type == 'flutter'
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qry app-unsigned.ipa Payload
+
+      # ---------- Native Xcode ----------
+      - name: Build (Xcode, unsigned)
+        if: steps.detect.outputs.type == 'xcode'
+        env:
+          INPUT_SCHEME: ${{ github.event.inputs.scheme }}
+        run: |
+          set -eo pipefail
+
+          WS=$(find . -maxdepth 4 -name '*.xcworkspace' -not -path '*/Pods/*' -not -path '*.xcodeproj/*' | head -1)
+          PROJ=$(find . -maxdepth 4 -name '*.xcodeproj' -not -path '*/Pods/*' | head -1)
+
+          if [ -n "$WS" ]; then
+            TARGET=(-workspace "$WS")
+            LIST_JSON=$(xcodebuild -list -json -workspace "$WS")
+          else
+            TARGET=(-project "$PROJ")
+            LIST_JSON=$(xcodebuild -list -json -project "$PROJ")
+          fi
+
+          SCHEME="$INPUT_SCHEME"
+          if [ -z "$SCHEME" ]; then
+            SCHEME=$(echo "$LIST_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); k='workspace' if 'workspace' in d else 'project'; print(d[k]['schemes'][0])")
+          fi
+          echo "Using scheme: $SCHEME"
+
+          xcodebuild "${TARGET[@]}" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          [ -n "$APP" ] || { echo "No .app produced"; exit 1; }
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry app-unsigned.ipa Payload
+
+      - name: Upload IPA
+        if: steps.detect.outputs.type != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ipa
+          path: app-unsigned.ipa
+          if-no-files-found: error
